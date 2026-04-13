@@ -1,0 +1,52 @@
+import sys, random, torch, torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader, random_split
+
+def set_seed(seed=42):
+    random.seed(seed)
+    torch.manual_seed(seed)
+
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def make_dataloaders(batch_size=16):
+    X = torch.tensor([[0,0],[0,1],[1,0],[1,1]], dtype=torch.float32).repeat(100, 1)
+    y = torch.tensor([[0],[1],[1],[0]], dtype=torch.float32).repeat(100, 1)
+    dataset = TensorDataset(X, y)
+    n_train = int(0.8 * len(dataset))
+    train_ds, val_ds = random_split(dataset, [n_train, len(dataset) - n_train])
+    return (DataLoader(ds, batch_size=batch_size, shuffle=s) for ds, s in [(train_ds, True), (val_ds, False)])
+
+def build_model():
+    return nn.Sequential(nn.Linear(2, 8), nn.ReLU(), nn.Linear(8, 1))
+
+def train(model, loader, device, epochs=200, lr=0.05):
+    criterion, optimizer = nn.BCEWithLogitsLoss(), torch.optim.Adam(model.parameters(), lr=lr)
+    model.train()
+    for _ in range(epochs):
+        for X, y in loader:
+            optimizer.zero_grad()
+            loss = criterion(model(X.to(device)), y.to(device))
+            loss.backward()
+            optimizer.step()
+
+def evaluate(model, loader, device):
+    criterion = nn.BCEWithLogitsLoss()
+    model.eval()
+    total_loss, correct, total = 0, 0, 0
+    with torch.no_grad():
+        for X, y in loader:
+            X, y = X.to(device), y.to(device)
+            out = model(X)
+            total_loss += criterion(out, y).item()
+            correct += ((torch.sigmoid(out) >= 0.5).float() == y).sum().item()
+            total += y.size(0)
+    return {"loss": total_loss / len(loader), "accuracy": correct / total}
+
+if __name__ == "__main__":
+    try:
+        set_seed()
+        device = get_device()
+        train_loader, val_loader = make_dataloaders()
+        model = build_model().to(device)
+        train(model, train_loader, device)
+        train_metrics = evaluate(model, train_loader, device)
