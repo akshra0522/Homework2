@@ -1,0 +1,98 @@
+import sys, random, torch, torch.nn as nn, matplotlib.pyplot as plt
+from torch.utils.data import TensorDataset, DataLoader, random_split
+
+def set_seed(seed=42):
+    random.seed(seed); torch.manual_seed(seed)
+
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def make_dataloaders(batch_size=32):
+    clean = torch.randn(1000, 20)
+    dataset = TensorDataset(clean + 0.3 * torch.randn(1000, 20), clean)
+    n_train = int(0.8 * len(dataset))
+    train_ds, val_ds = random_split(dataset, [n_train, len(dataset) - n_train],
+                                    generator=torch.Generator().manual_seed(42))
+    return (DataLoader(ds, batch_size=batch_size, shuffle=s) for ds, s in [(train_ds, True), (val_ds, False)])
+
+def build_model():
+    return nn.Sequential(
+        nn.Linear(20, 16), nn.ReLU(),
+        nn.Linear(16, 8),  nn.ReLU(),
+        nn.Linear(8, 16),  nn.ReLU(),
+        nn.Linear(16, 20)
+    )
+
+def train(model, train_loader, val_loader, device, epochs=100, lr=0.001):
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    history = {"train_loss": [], "val_loss": []}
+
+    for _ in range(epochs):
+        model.train()
+        train_loss = sum(
+            (optimizer.zero_grad(), loss := criterion(model(n.to(device)), c.to(device)),
+             loss.backward(), optimizer.step(), loss.item())[-1]
+            for n, c in train_loader
+        ) / len(train_loader)
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = sum(criterion(model(n.to(device)), c.to(device)).item()
+                          for n, c in val_loader) / len(val_loader)
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+
+    return history
+
+def evaluate(model, loader, device):
+    criterion = nn.MSELoss()
+    model.eval()
+    total, baseline = 0.0, 0.0
+    with torch.no_grad():
+        for noisy, clean in loader:
+            noisy, clean = noisy.to(device), clean.to(device)
+            total    += criterion(model(noisy), clean).item()
+            baseline += criterion(noisy, clean).item()
+    mse, base_mse = total / len(loader), baseline / len(loader)
+    return {"mse": mse, "baseline_mse": base_mse, "improvement": base_mse - mse}
+
+def save_artifacts(history, sample_noisy, sample_clean, sample_recon):
+    plt.figure()
+    plt.plot(history["train_loss"], label="train"); plt.plot(history["val_loss"], label="val")
+    plt.xlabel("Epoch"); plt.ylabel("MSE Loss"); plt.legend()
+    plt.savefig("ae_new4_denoising_synthetic_loss.png"); plt.close()
+
+    plt.figure(figsize=(10, 6))
+    for i in range(3):
+        for j, (data, title) in enumerate([(sample_noisy, "Noisy"), (sample_recon, "Reconstructed"), (sample_clean, "Clean")]):
+            plt.subplot(3, 3, i + j*3 + 1)
+            plt.plot(data[i].cpu().numpy()); plt.title(f"{title} {i+1}")
+    plt.tight_layout(); plt.savefig("ae_new4_denoising_synthetic_recon.png"); plt.close()
+
+    torch.save({"history": history}, "ae_new4_denoising_synthetic_artifacts.pt")
+
+if __name__ == "__main__":
+    try:
+        set_seed()
+        device = get_device()
+        train_loader, val_loader = make_dataloaders()
+        model = build_model().to(device)
+        history = train(model, train_loader, val_loader, device)
+        train_metrics = evaluate(model, train_loader, device)
+        val_metrics   = evaluate(model, val_loader,   device)
+        print("Train:", train_metrics)
+        print("Val:  ", val_metrics)
+
+        sample_noisy, sample_clean = [x[:3].to(device) for x in next(iter(val_loader))]
+        model.eval()
+        with torch.no_grad():
+            sample_recon = model(sample_noisy)
+        save_artifacts(history, sample_noisy, sample_clean, sample_recon)
+
+        assert val_metrics["mse"] < val_metrics["baseline_mse"], "Model did not improve over noisy baseline"
+        assert val_metrics["improvement"] > 0.02, "Denoising improvement too small"
+        sys.exit(0)
+    except Exception as e:
+        print("Error:", e); sys.exit(1)
