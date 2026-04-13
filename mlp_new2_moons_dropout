@@ -1,0 +1,89 @@
+import sys, random, torch, torch.nn as nn, matplotlib.pyplot as plt
+from sklearn.datasets import make_moons
+from sklearn.metrics import accuracy_score
+from torch.utils.data import TensorDataset, DataLoader, random_split
+
+def set_seed(seed=42):
+    random.seed(seed); torch.manual_seed(seed)
+
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def make_dataloaders(batch_size=32):
+    X, y = make_moons(n_samples=1000, noise=0.2, random_state=42)
+    X = torch.tensor(X, dtype=torch.float32)
+    y = torch.tensor(y, dtype=torch.float32).view(-1, 1)
+    n_train = int(0.8 * len(X))
+    train_ds, val_ds = random_split(TensorDataset(X, y), [n_train, len(X) - n_train],
+                                    generator=torch.Generator().manual_seed(42))
+    return (DataLoader(ds, batch_size=batch_size, shuffle=s) for ds, s in [(train_ds, True), (val_ds, False)])
+
+def build_model():
+    return nn.Sequential(
+        nn.Linear(2, 32), nn.ReLU(), nn.Dropout(0.2),
+        nn.Linear(32, 16), nn.ReLU(), nn.Dropout(0.2),
+        nn.Linear(16, 1)
+    )
+
+def train(model, train_loader, val_loader, device, epochs=200, lr=0.01):
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    history = {"train_loss": [], "val_loss": []}
+
+    for _ in range(epochs):
+        model.train()
+        train_loss = sum(
+            (optimizer.zero_grad(), loss := criterion(model(X.to(device)), y.to(device)),
+             loss.backward(), optimizer.step(), loss.item())[-1]
+            for X, y in train_loader
+        ) / len(train_loader)
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = sum(criterion(model(X.to(device)), y.to(device)).item()
+                          for X, y in val_loader) / len(val_loader)
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+
+    return history
+
+def evaluate(model, loader, device):
+    criterion, all_preds, all_targets = nn.BCEWithLogitsLoss(), [], []
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for X, y in loader:
+            out = model(X.to(device))
+            total_loss += criterion(out, y.to(device)).item()
+            preds = (torch.sigmoid(out) >= 0.5).float()
+            all_preds.extend(preds.cpu().numpy().flatten())
+            all_targets.extend(y.numpy().flatten())
+    return {"loss": total_loss / len(loader), "accuracy": accuracy_score(all_targets, all_preds)}
+
+def save_artifacts(history, train_metrics, val_metrics):
+    plt.figure()
+    plt.plot(history["train_loss"], label="train_loss")
+    plt.plot(history["val_loss"], label="val_loss")
+    plt.xlabel("Epoch"); plt.ylabel("Loss")
+    plt.title("moons_dropout Loss Curve"); plt.legend()
+    plt.savefig("mlp_new2_moons_dropout_loss.png"); plt.close()
+    torch.save({"train_metrics": train_metrics, "val_metrics": val_metrics},
+               "mlp_new2_moons_dropout_artifacts.pt")
+
+if __name__ == "__main__":
+    try:
+        set_seed()
+        device = get_device()
+        train_loader, val_loader = make_dataloaders()
+        model = build_model().to(device)
+        history = train(model, train_loader, val_loader, device)
+        train_metrics = evaluate(model, train_loader, device)
+        val_metrics   = evaluate(model, val_loader,   device)
+        print("Train:", train_metrics)
+        print("Val:  ", val_metrics)
+        assert val_metrics["accuracy"] > 0.88, "Validation accuracy too low"
+        save_artifacts(history, train_metrics, val_metrics)
+        sys.exit(0)
+    except Exception as e:
+        print("Error:", e); sys.exit(1)
